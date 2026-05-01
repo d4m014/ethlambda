@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 /// allowing us to skip storing empty bodies and reconstruct them on read.
 static EMPTY_BODY_ROOT: LazyLock<H256> = LazyLock::new(|| BlockBody::default().hash_tree_root());
 
-use crate::api::{StorageBackend, StorageWriteBatch, Table, Error};
+use crate::api::{Error, StorageBackend, StorageWriteBatch, Table};
 
 use ethlambda_types::{
     attestation::{AttestationData, HashedAttestationData, bits_is_subset},
@@ -461,7 +461,10 @@ impl Store {
     ///
     /// Uses the state's `latest_block_header` as the anchor block header.
     /// No block body is stored since it's not available.
-    pub fn from_anchor_state(backend: Arc<dyn StorageBackend>, anchor_state: State) -> Result<Self, Error> {
+    pub fn from_anchor_state(
+        backend: Arc<dyn StorageBackend>,
+        anchor_state: State,
+    ) -> Result<Self, Error> {
         Self::init_store(backend, anchor_state, None)
     }
 
@@ -584,14 +587,15 @@ impl Store {
 
     fn get_metadata<T: SszDecode>(&self, key: &[u8]) -> Result<T, Error> {
         let view = self.backend.begin_read()?;
-        let bytes = view.get(Table::Metadata, key)?.ok_or("Metadata key not found")?;
+        let bytes = view
+            .get(Table::Metadata, key)?
+            .ok_or("Metadata key not found")?;
         T::from_ssz_bytes(&bytes).map_err(|e| e.into())
     }
 
-    fn set_metadata<T: SszEncode>(&self, key: &[u8], value: &T) -> Result<(), Error>{
+    fn set_metadata<T: SszEncode>(&self, key: &[u8], value: &T) -> Result<(), Error> {
         let mut batch = self.backend.begin_write()?;
-        batch
-            .put_batch(Table::Metadata, vec![(key.to_vec(), value.to_ssz())])?;
+        batch.put_batch(Table::Metadata, vec![(key.to_vec(), value.to_ssz())])?;
         batch.commit()
     }
 
@@ -628,7 +632,7 @@ impl Store {
     // ============ Safe Target ============
 
     /// Returns the safe target block root for attestations.
-    pub fn safe_target(&self) -> Result<H256,Error> {
+    pub fn safe_target(&self) -> Result<H256, Error> {
         self.get_metadata(KEY_SAFE_TARGET)
     }
 
@@ -680,7 +684,7 @@ impl Store {
         // live chain index, signatures, and attestation data. These are cheap and
         // affect fork choice correctness (live chain) or attestation processing.
         // Heavy state/block pruning is deferred to prune_old_data().
-        Ok(if let Some(finalized) = checkpoints.finalized
+        if let Some(finalized) = checkpoints.finalized
             && finalized.slot > old_finalized_slot
         {
             let pruned_chain = self.prune_live_chain(finalized.slot)?;
@@ -692,7 +696,8 @@ impl Store {
                     pruned_chain, pruned_sigs, "Pruned finalized data"
                 );
             }
-        })
+        }
+        Ok(())
     }
 
     /// Prune old states and blocks to keep storage bounded.
@@ -705,9 +710,10 @@ impl Store {
         let protected_roots = [self.latest_finalized()?.root, self.latest_justified()?.root];
         let pruned_states = self.prune_old_states(&protected_roots)?;
         let pruned_blocks = self.prune_old_blocks(&protected_roots)?;
-        Ok(if pruned_states > 0 || pruned_blocks > 0 {
+        if pruned_states > 0 || pruned_blocks > 0 {
             info!(pruned_states, pruned_blocks, "Pruned old states and blocks");
-        })
+        }
+        Ok(())
     }
 
     // ============ Blocks ============
@@ -798,7 +804,9 @@ impl Store {
             .prefix_iterator(Table::BlockHeaders, &[])?
             .filter_map(|res| res.ok())
             .filter_map(|(key, value)| {
-                BlockHeader::from_ssz_bytes(&value).ok().map(|h| (key.to_vec(), h.slot))
+                BlockHeader::from_ssz_bytes(&value)
+                    .ok()
+                    .map(|h| (key.to_vec(), h.slot))
             })
             .collect();
         drop(view);
@@ -844,7 +852,9 @@ impl Store {
             .prefix_iterator(Table::BlockHeaders, &[])?
             .filter_map(|res| res.ok())
             .filter_map(|(key, value)| {
-                BlockHeader::from_ssz_bytes(&value).ok().map(|h| (key.to_vec(), h.slot))
+                BlockHeader::from_ssz_bytes(&value)
+                    .ok()
+                    .map(|h| (key.to_vec(), h.slot))
             })
             .collect();
         drop(view);
@@ -895,7 +905,11 @@ impl Store {
     ///
     /// When the block is later processed via [`insert_signed_block`](Self::insert_signed_block),
     /// the same keys are overwritten (idempotent) and a `LiveChain` entry is added.
-    pub fn insert_pending_block(&mut self, root: H256, signed_block: SignedBlock) -> Result<(), Error> {
+    pub fn insert_pending_block(
+        &mut self,
+        root: H256,
+        signed_block: SignedBlock,
+    ) -> Result<(), Error> {
         let mut batch = self.backend.begin_write()?;
         write_signed_block(batch.as_mut(), &root, signed_block)?;
         batch.commit()
@@ -908,7 +922,11 @@ impl Store {
     /// only storing signatures for non-genesis blocks.
     ///
     /// Takes ownership to avoid cloning large signature data.
-    pub fn insert_signed_block(&mut self, root: H256, signed_block: SignedBlock) -> Result<(), Error> {
+    pub fn insert_signed_block(
+        &mut self,
+        root: H256,
+        signed_block: SignedBlock,
+    ) -> Result<(), Error> {
         let mut batch = self.backend.begin_write()?;
         let block = write_signed_block(batch.as_mut(), &root, signed_block)?;
 
@@ -936,8 +954,8 @@ impl Store {
             return Ok(None);
         };
 
-        let header = BlockHeader::from_ssz_bytes(&header_bytes)
-            .map_err(|e| -> Error { Box::new(e) })?;
+        let header =
+            BlockHeader::from_ssz_bytes(&header_bytes).map_err(|e| -> Error { Box::new(e) })?;
 
         // Use empty body if header indicates empty, otherwise fetch from DB
         let body = if header.body_root == *EMPTY_BODY_ROOT {
@@ -946,13 +964,12 @@ impl Store {
             let Some(body_bytes) = view.get(Table::BlockBodies, &key)? else {
                 return Ok(None);
             };
-            BlockBody::from_ssz_bytes(&body_bytes)
-                .map_err(|e| -> Error { Box::new(e) })?
+            BlockBody::from_ssz_bytes(&body_bytes).map_err(|e| -> Error { Box::new(e) })?
         };
 
         let block = Block::from_header_and_body(header, body);
-        let signature = BlockSignatures::from_ssz_bytes(&sig_bytes)
-            .map_err(|e| -> Error { Box::new(e) })?;
+        let signature =
+            BlockSignatures::from_ssz_bytes(&sig_bytes).map_err(|e| -> Error { Box::new(e) })?;
 
         Ok(Some(SignedBlock {
             message: block,
@@ -973,8 +990,7 @@ impl Store {
     /// Returns whether a state exists for the given block root.
     pub fn has_state(&self, root: &H256) -> Result<bool, Error> {
         let view = self.backend.begin_read()?;
-        Ok(view.get(Table::States, &root.to_ssz())?
-            .is_some())
+        Ok(view.get(Table::States, &root.to_ssz())?.is_some())
     }
 
     /// Stores a state indexed by block root.
@@ -1168,14 +1184,16 @@ impl Store {
 
     /// Returns the slot of the current head block.
     pub fn head_slot(&self) -> Result<u64, Error> {
-        Ok(self.get_block_header(&self.head()?)?
+        Ok(self
+            .get_block_header(&self.head()?)?
             .ok_or_else(|| -> Error { "head block header not found".into() })?
             .slot)
     }
 
     /// Returns the slot of the current safe target block.
     pub fn safe_target_slot(&self) -> Result<u64, Error> {
-        Ok(self.get_block_header(&self.safe_target()?)?
+        Ok(self
+            .get_block_header(&self.safe_target()?)?
             .ok_or_else(|| -> Error { "safe target block header not found".into() })?
             .slot)
     }
@@ -1380,7 +1398,9 @@ mod tests {
         // Protect the two oldest blocks (slots 0 and 1)
         let finalized_root = root(0);
         let justified_root = root(1);
-        let pruned = store.prune_old_blocks(&[finalized_root, justified_root]).unwrap();
+        let pruned = store
+            .prune_old_blocks(&[finalized_root, justified_root])
+            .unwrap();
 
         // 10 would be pruned, but 2 are protected
         assert_eq!(pruned, 8);
@@ -1469,7 +1489,9 @@ mod tests {
 
         let finalized_root = root(0);
         let justified_root = root(2);
-        let pruned = store.prune_old_states(&[finalized_root, justified_root]).unwrap();
+        let pruned = store
+            .prune_old_states(&[finalized_root, justified_root])
+            .unwrap();
 
         // 5 would be pruned, but 2 are protected
         assert_eq!(pruned, 3);
@@ -1530,7 +1552,9 @@ mod tests {
         // Use the last inserted root as head. Calling update_checkpoints with
         // head_only triggers the fallback path (finalization doesn't advance).
         let head_root = root(total_states as u64 - 1);
-        store.update_checkpoints(ForkCheckpoints::head_only(head_root)).unwrap();
+        store
+            .update_checkpoints(ForkCheckpoints::head_only(head_root))
+            .unwrap();
 
         // update_checkpoints no longer prunes states/blocks inline — the caller
         // must invoke prune_old_data() separately (after a block cascade completes).
@@ -1581,7 +1605,9 @@ mod tests {
 
         // Use the last inserted root as head
         let head_root = root(STATES_TO_KEEP as u64 - 1);
-        store.update_checkpoints(ForkCheckpoints::head_only(head_root)).unwrap();
+        store
+            .update_checkpoints(ForkCheckpoints::head_only(head_root))
+            .unwrap();
         store.prune_old_data().unwrap();
 
         // Nothing should be pruned (within retention window)

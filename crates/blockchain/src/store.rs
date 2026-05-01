@@ -42,15 +42,14 @@ fn accept_new_attestations(store: &mut Store, log_tree: bool) {
     store.promote_new_aggregated_payloads();
     metrics::update_latest_new_aggregated_payloads(store.new_aggregated_payloads_count());
     metrics::update_latest_known_aggregated_payloads(store.known_aggregated_payloads_count());
-    let _ = update_head(store, log_tree)
-        .inspect_err(|e| warn!(%e, "Failed to update head"));
+    let _ = update_head(store, log_tree).inspect_err(|e| warn!(%e, "Failed to update head"));
 }
 
 /// Update the head based on the fork choice rule.
 ///
 /// When `log_tree` is true, also computes block weights and logs an ASCII
 /// fork choice tree to the terminal.
-fn update_head(store: &mut Store, log_tree: bool) -> Result<(), StoreError>{
+fn update_head(store: &mut Store, log_tree: bool) -> Result<(), StoreError> {
     let blocks = store.get_live_chain()?;
     let attestations = store.extract_latest_known_attestations();
     let old_head = store.head()?;
@@ -118,7 +117,8 @@ fn update_head(store: &mut Store, log_tree: bool) -> Result<(), StoreError>{
 /// evidence even when live participation has collapsed: exactly the failure
 /// mode safe target is supposed to prevent. See leanSpec PR #680.
 fn update_safe_target(store: &mut Store) -> Result<(), StoreError> {
-    let head_state = store.get_state(&store.head()?)?
+    let head_state = store
+        .get_state(&store.head()?)?
         .ok_or_else(|| StoreError::Storage("head state not found".into()))?;
     let num_validators = head_state.validators.len() as u64;
 
@@ -228,8 +228,12 @@ pub fn on_tick(store: &mut Store, timestamp_ms: u64, has_proposal: bool) {
 
     loop {
         let Ok(t) = store.time() else { return };
-        if t >= time { break; }
-        if store.set_time(t + 1).is_err() { return; }
+        if t >= time {
+            break;
+        }
+        if store.set_time(t + 1).is_err() {
+            return;
+        }
 
         let new_time = t + 1;
         let slot = new_time / INTERVALS_PER_SLOT;
