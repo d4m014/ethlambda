@@ -17,48 +17,18 @@ mod fork_choice;
 mod heap_profiling;
 pub mod metrics;
 
-<<<<<<< Updated upstream
-pub async fn start_api_server(
-    address: SocketAddr,
-    store: Store,
-    aggregator: AggregatorController,
-    shutdown: CancellationToken,
-) -> Result<(), std::io::Error> {
-    let api_router = build_api_router(store).layer(Extension(aggregator));
-
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, api_router)
-        .with_graceful_shutdown(async move {
-            shutdown.cancelled().await;
-        })
-        .await?;
-
-    Ok(())
-}
-
-pub async fn start_metrics_server(
-    address: SocketAddr,
-    shutdown: CancellationToken,
-) -> Result<(), std::io::Error> {
-    let metrics_router = metrics::start_prometheus_metrics_api();
-    let debug_router = build_debug_router();
-
-    let app = Router::new().merge(metrics_router).merge(debug_router);
-
-    let listener = tokio::net::TcpListener::bind(address).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.cancelled().await;
-        })
-        .await?;
-=======
 pub struct RpcConfig {
     pub http_address: IpAddr,
     pub api_port: u16,
     pub metrics_port: u16,
 }
 
-pub async fn start_rpc_server(config: RpcConfig, store: Store, aggregator: AggregatorController) -> Result<(), std::io::Error> {
+pub async fn start_rpc_server(
+    config: RpcConfig,
+    store: Store,
+    aggregator: AggregatorController,
+    shutdown: CancellationToken,
+) -> Result<(), std::io::Error> {
     let api_router = build_api_router(store).layer(Extension(aggregator));
     let metrics_router = metrics::start_prometheus_metrics_api();
     let debug_router = build_debug_router();
@@ -67,19 +37,27 @@ pub async fn start_rpc_server(config: RpcConfig, store: Store, aggregator: Aggre
         let app = Router::new().merge(api_router).merge(metrics_router).merge(debug_router);
         let addr = SocketAddr::new(config.http_address, config.api_port);
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+            })
+            .await?;
     } else {
         let api_addr = SocketAddr::new(config.http_address, config.api_port);
         let metrics_addr = SocketAddr::new(config.http_address, config.metrics_port);
         let api_listener = tokio::net::TcpListener::bind(api_addr).await?;
         let metrics_listener = tokio::net::TcpListener::bind(metrics_addr).await?;
         let metrics_app = Router::new().merge(metrics_router).merge(debug_router);
+        let metrics_shutdown = shutdown.clone();
         tokio::try_join!(
-            axum::serve(api_listener, api_router),
-            axum::serve(metrics_listener, metrics_app),
+            axum::serve(api_listener, api_router).with_graceful_shutdown(async move {
+                shutdown.cancelled().await;
+            }),
+            axum::serve(metrics_listener, metrics_app).with_graceful_shutdown(async move {
+                metrics_shutdown.cancelled().await;
+            }),
         )?;
     }
->>>>>>> Stashed changes
 
     Ok(())
 }
