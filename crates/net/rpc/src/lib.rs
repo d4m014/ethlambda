@@ -17,6 +17,7 @@ mod fork_choice;
 mod heap_profiling;
 pub mod metrics;
 
+#[derive(Debug, Clone)]
 pub struct RpcConfig {
     pub http_address: IpAddr,
     pub api_port: u16,
@@ -34,7 +35,10 @@ pub async fn start_rpc_server(
     let debug_router = build_debug_router();
 
     if config.api_port == config.metrics_port {
-        let app = Router::new().merge(api_router).merge(metrics_router).merge(debug_router);
+        let app = Router::new()
+            .merge(api_router)
+            .merge(metrics_router)
+            .merge(debug_router);
         let addr = SocketAddr::new(config.http_address, config.api_port);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app)
@@ -65,7 +69,7 @@ pub async fn start_rpc_server(
 /// Build the API router with the given store.
 ///
 /// The aggregator controller is threaded in via `Extension` by the caller
-/// (see `start_api_server`) so existing store-backed handlers don't need to
+/// (see `start_rpc_server`) so existing store-backed handlers don't need to
 /// know about it and admin handlers extract it independently.
 fn build_api_router(store: Store) -> Router {
     Router::new()

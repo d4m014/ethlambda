@@ -34,8 +34,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, Layer, Registry, layer::SubscriberExt};
 
 use ethlambda_blockchain::BlockChain;
-use ethlambda_storage::{StorageBackend, Store, backend::RocksDBBackend};
 use ethlambda_rpc::RpcConfig;
+use ethlambda_storage::{StorageBackend, Store, backend::RocksDBBackend};
 
 const ASCII_ART: &str = r#"
       _   _     _                 _         _
