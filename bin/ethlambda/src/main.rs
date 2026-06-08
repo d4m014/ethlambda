@@ -1,4 +1,5 @@
 mod checkpoint_sync;
+mod fd_limit;
 mod version;
 
 // Jemalloc causes programs to deadlock during process startup under Shadow.
@@ -156,6 +157,13 @@ async fn main() -> eyre::Result<()> {
     println!("{ASCII_ART}");
 
     info!(version = version::CLIENT_VERSION, "Starting ethlambda");
+
+    // Raise the soft open-file-descriptor limit to the hard limit. RocksDB
+    // keeps an unbounded table cache (`set_max_open_files(-1)`), so on
+    // containerized hosts with the default ulimit of 1024 the store
+    // eventually panics with `EMFILE`. Fail fast at startup rather than
+    // stall days later when the cache outgrows the limit.
+    fd_limit::raise_fd_limit().wrap_err("failed to raise RLIMIT_NOFILE")?;
 
     // Hive lean spec-asset suites boot the client with
     // HIVE_LEAN_TEST_DRIVER=1 so it skips the consensus/p2p stack and
