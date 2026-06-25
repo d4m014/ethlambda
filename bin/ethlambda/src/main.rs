@@ -738,7 +738,8 @@ async fn fetch_initial_state(
         .map_err(|_| checkpoint_sync::CheckpointSyncError::AnchorPairingMismatch)?;
     store
         .insert_signed_block(anchor_root, signed_block)
-        .expect("inserting anchor block signatures into store should succeed");
+        .inspect_err(|err| error!(%err, "Failed to insert anchor signed block into store"))
+        .map_err(|_| checkpoint_sync::CheckpointSyncError::StoreInsertSignedBlock)?;
     Ok(store)
 }
 
