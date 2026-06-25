@@ -726,8 +726,8 @@ impl Store {
     }
 
     /// Sets the current store time.
-    pub fn set_time(&mut self, time: u64) {
-        self.set_metadata(KEY_TIME, &time).expect("set time");
+    pub fn set_time(&mut self, time: u64) -> Result<(), Error> {
+        self.set_metadata(KEY_TIME, &time)
     }
 
     // ============ Config ============
@@ -752,9 +752,8 @@ impl Store {
     }
 
     /// Sets the safe target block root.
-    pub fn set_safe_target(&mut self, safe_target: H256) {
+    pub fn set_safe_target(&mut self, safe_target: H256) -> Result<(), Error> {
         self.set_metadata(KEY_SAFE_TARGET, &safe_target)
-            .expect("set safe target");
     }
 
     // ============ Checkpoints ============

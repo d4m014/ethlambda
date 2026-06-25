@@ -121,7 +121,9 @@ fn update_safe_target(store: &mut Store) {
         &attestations,
         min_target_score,
     );
-    store.set_safe_target(safe_target);
+    store
+        .set_safe_target(safe_target)
+        .expect("set_safe_target should succeed");
 }
 
 /// Return whether `ancestor` lies on `descendant`'s parent chain.
@@ -265,11 +267,15 @@ pub fn on_tick(store: &mut Store, timestamp_ms: u64, has_proposal: bool) {
     // If we're more than a slot behind, fast-forward to a slot before.
     // Operations are idempotent, so this should be fine.
     if time.saturating_sub(store.time()) > INTERVALS_PER_SLOT {
-        store.set_time(time - INTERVALS_PER_SLOT);
+        store
+            .set_time(time - INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
     }
 
     while store.time() < time {
-        store.set_time(store.time() + 1);
+        store
+            .set_time(store.time() + 1)
+            .expect("set_time should succeed");
 
         let slot = store.time() / INTERVALS_PER_SLOT;
         let interval = store.time() % INTERVALS_PER_SLOT;
@@ -1274,7 +1280,9 @@ mod tests {
         store
             .update_checkpoints(ForkCheckpoints::new(b, Some(off_head_justified), None))
             .expect("update_checkpoints should succeed");
-        store.set_time(2 * INTERVALS_PER_SLOT);
+        store
+            .set_time(2 * INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
 
         let data = produce_attestation_data(&store, 2);
 
@@ -1303,7 +1311,9 @@ mod tests {
         insert_test_block(&mut store, base, 1, genesis);
         insert_test_block(&mut store, fork_left, 2, base);
         insert_test_block(&mut store, fork_right, 3, base);
-        store.set_time(3 * INTERVALS_PER_SLOT);
+        store
+            .set_time(3 * INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
 
         // source=base, target=fork_left, head=fork_right: target and head share a
         // parent (base) but neither is an ancestor of the other.
@@ -1345,7 +1355,9 @@ mod tests {
         insert_test_block(&mut store, fork_left, 2, base);
         insert_test_block(&mut store, fork_right, 3, base);
         insert_test_block(&mut store, fork_right_head, 4, fork_right);
-        store.set_time(4 * INTERVALS_PER_SLOT);
+        store
+            .set_time(4 * INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
 
         // source=fork_left (abandoned branch), target=head=fork_right_head:
         // source precedes target in slot but lies off the target's chain.
@@ -1386,7 +1398,9 @@ mod tests {
         insert_test_block(&mut store, b1, 1, genesis);
         insert_test_block(&mut store, b2, 2, b1);
         insert_test_block(&mut store, b3, 3, b2);
-        store.set_time(3 * INTERVALS_PER_SLOT);
+        store
+            .set_time(3 * INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
 
         // head=b3 at slot 3, but the vote's own slot is 2: it claims to have seen
         // a head that did not yet exist when the vote was cast.
@@ -1426,7 +1440,9 @@ mod tests {
         let b2 = H256([2u8; 32]);
         insert_test_block(&mut store, b1, 1, genesis);
         insert_test_block(&mut store, b2, 2, b1);
-        store.set_time(2 * INTERVALS_PER_SLOT);
+        store
+            .set_time(2 * INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
 
         // A crafted gossip vote with a near-`u64::MAX` slot. The head-consistency
         // check passes (slot >= head.slot), so this exercises the time check.
@@ -1457,7 +1473,9 @@ mod tests {
         let b2 = H256([2u8; 32]);
         insert_test_block(&mut store, b1, 1, genesis);
         insert_test_block(&mut store, b2, 2, b1);
-        store.set_time(2 * INTERVALS_PER_SLOT);
+        store
+            .set_time(2 * INTERVALS_PER_SLOT)
+            .expect("set_time should succeed");
 
         let data = AttestationData {
             slot: 2,
