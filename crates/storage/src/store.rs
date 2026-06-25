@@ -1778,7 +1778,7 @@ mod tests {
         let head_root = root(total_states as u64 - 1);
         store
             .update_checkpoints(ForkCheckpoints::head_only(head_root))
-            .expect("");
+            .expect("update_checkpoints should succeed");
 
         // update_checkpoints no longer prunes states/blocks inline — the caller
         // must invoke prune_old_data() separately (after a block cascade completes).
