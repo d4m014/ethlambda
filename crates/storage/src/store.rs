@@ -596,13 +596,17 @@ impl Store {
     pub fn from_db_state(
         backend: Arc<dyn StorageBackend>,
         expected_genesis_time: u64,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, Error> {
         let persisted_config = {
             let view = backend.begin_read().expect("read view");
-            let bytes = view.get(Table::Metadata, KEY_CONFIG).expect("get config")?;
+            let bytes = view
+                .get(Table::Metadata, KEY_CONFIG)
+                .expect("get config")
+                .unwrap();
             // probe KEY_LATEST_FINALIZED
             view.get(Table::Metadata, KEY_LATEST_FINALIZED)
-                .expect("get latest finalized")?;
+                .expect("get latest finalized")
+                .unwrap();
             ChainConfig::from_ssz_bytes(&bytes).expect("valid config")
         };
         if persisted_config.genesis_time != expected_genesis_time {
@@ -611,10 +615,10 @@ impl Store {
                 expected_genesis_time,
                 "Persisted DB has a different genesis_time; treating as empty"
             );
-            return None;
+            return Ok(None);
         }
         info!("Loaded store from persisted DB state");
-        Some(Self {
+        Ok(Some(Self {
             backend,
             new_payloads: Arc::new(Mutex::new(PayloadBuffer::new(NEW_PAYLOAD_CAP))),
             known_payloads: Arc::new(Mutex::new(PayloadBuffer::new(AGGREGATED_PAYLOAD_CAP))),
@@ -622,7 +626,7 @@ impl Store {
                 GOSSIP_SIGNATURE_CAP,
             ))),
             state_cache: new_state_cache(),
-        })
+        }))
     }
 
     /// Internal helper to initialize the store with anchor data.
@@ -727,13 +731,13 @@ impl Store {
 
     // ============ Metadata Helpers ============
 
-    fn get_metadata<T: SszDecode>(&self, key: &[u8]) -> T {
+    fn get_metadata<T: SszDecode>(&self, key: &[u8]) -> Result<T, Error> {
         let view = self.backend.begin_read().expect("read view");
         let bytes = view
             .get(Table::Metadata, key)
             .expect("get")
             .expect("metadata key exists");
-        T::from_ssz_bytes(&bytes).expect("valid encoding")
+        Ok(T::from_ssz_bytes(&bytes).expect("valid encoding"))
     }
 
     fn set_metadata<T: SszEncode>(&self, key: &[u8], value: &T) -> Result<(), Error> {
@@ -752,7 +756,7 @@ impl Store {
     /// Each increment represents one 800ms interval. Derive slot/interval as:
     ///   slot     = time() / INTERVALS_PER_SLOT
     ///   interval = time() % INTERVALS_PER_SLOT
-    pub fn time(&self) -> u64 {
+    pub fn time(&self) -> Result<u64, Error> {
         self.get_metadata(KEY_TIME)
     }
 
@@ -764,21 +768,21 @@ impl Store {
     // ============ Config ============
 
     /// Returns the chain configuration.
-    pub fn config(&self) -> ChainConfig {
+    pub fn config(&self) -> Result<ChainConfig, Error> {
         self.get_metadata(KEY_CONFIG)
     }
 
     // ============ Head ============
 
     /// Returns the current head block root.
-    pub fn head(&self) -> H256 {
+    pub fn head(&self) -> Result<H256, Error> {
         self.get_metadata(KEY_HEAD)
     }
 
     // ============ Safe Target ============
 
     /// Returns the safe target block root for attestations.
-    pub fn safe_target(&self) -> H256 {
+    pub fn safe_target(&self) -> Result<H256, Error> {
         self.get_metadata(KEY_SAFE_TARGET)
     }
 
@@ -790,12 +794,12 @@ impl Store {
     // ============ Checkpoints ============
 
     /// Returns the latest justified checkpoint.
-    pub fn latest_justified(&self) -> Checkpoint {
+    pub fn latest_justified(&self) -> Result<Checkpoint, Error> {
         self.get_metadata(KEY_LATEST_JUSTIFIED)
     }
 
     /// Returns the latest finalized checkpoint.
-    pub fn latest_finalized(&self) -> Checkpoint {
+    pub fn latest_finalized(&self) -> Result<Checkpoint, Error> {
         self.get_metadata(KEY_LATEST_FINALIZED)
     }
 
@@ -810,7 +814,10 @@ impl Store {
     /// When finalization advances, prunes the LiveChain index.
     pub fn update_checkpoints(&mut self, checkpoints: ForkCheckpoints) -> Result<(), Error> {
         // Read old finalized slot before updating metadata
-        let old_finalized_slot = self.latest_finalized().slot;
+        let old_finalized_slot = self
+            .latest_finalized()
+            .expect("Failed to get latest finalized checkpoint")
+            .slot;
 
         let mut entries = vec![(KEY_HEAD.to_vec(), checkpoints.head.to_ssz())];
 
@@ -858,17 +865,23 @@ impl Store {
     ///
     /// This is separated from `update_checkpoints` so callers can defer heavy
     /// pruning until after a batch of blocks has been fully processed.
-    pub fn prune_old_data(&mut self) {
-        let finalized_slot = self.latest_finalized().slot;
+    pub fn prune_old_data(&mut self) -> Result<(), Error> {
+        let finalized_slot = self
+            .latest_finalized()
+            .expect("Failed to get latest finalized checkpoint")
+            .slot;
         let tip_slot = self
-            .get_block_header(&self.head())
-            .map_or(finalized_slot, |header| header.slot);
+            .get_block_header(&self.head().expect("Failed to get head block root"))
+            .map_or(finalized_slot, |header| {
+                header.expect("Failed to get block header").slot
+            });
         let pruned_signatures = self
             .prune_old_block_signatures(finalized_slot, tip_slot)
             .expect("prune old block signatures");
         if pruned_signatures > 0 {
             info!(pruned_signatures, "Pruned old finalized block signatures");
         }
+        Ok(())
     }
 
     // ============ Blocks ============
@@ -877,9 +890,10 @@ impl Store {
     ///
     /// Iterates only the LiveChain table, avoiding Block deserialization.
     /// Returns only non-finalized blocks, automatically pruned on finalization.
-    pub fn get_live_chain(&self) -> HashMap<H256, (u64, H256)> {
+    pub fn get_live_chain(&self) -> Result<HashMap<H256, (u64, H256)>, Error> {
         let view = self.backend.begin_read().expect("read view");
-        view.prefix_iterator(Table::LiveChain, &[])
+        Ok(view
+            .prefix_iterator(Table::LiveChain, &[])
             .expect("iterator")
             .filter_map(|res| res.ok())
             .map(|(k, v)| {
@@ -887,32 +901,34 @@ impl Store {
                 let parent_root = H256::from_ssz_bytes(&v).expect("valid parent_root");
                 (root, (slot, parent_root))
             })
-            .collect()
+            .collect())
     }
 
     /// Return the highest slot in the live chain.
-    pub fn max_live_chain_slot(&self) -> Option<u64> {
+    pub fn max_live_chain_slot(&self) -> Result<Option<u64>, Error> {
         let view = self.backend.begin_read().expect("read view");
-        view.prefix_iterator(Table::LiveChain, &[])
+        Ok(view
+            .prefix_iterator(Table::LiveChain, &[])
             .expect("iterator")
             .filter_map(Result::ok)
             .map(|(key, _)| decode_slot_root_key(&key).0)
-            .max()
+            .max())
     }
 
     /// Get all known block roots as HashSet.
     ///
     /// Useful for checking block existence without deserializing.
-    pub fn get_block_roots(&self) -> HashSet<H256> {
+    pub fn get_block_roots(&self) -> Result<HashSet<H256>, Error> {
         let view = self.backend.begin_read().expect("read view");
-        view.prefix_iterator(Table::LiveChain, &[])
+        Ok(view
+            .prefix_iterator(Table::LiveChain, &[])
             .expect("iterator")
             .filter_map(|res| res.ok())
             .map(|(k, _)| {
                 let (_, root) = decode_slot_root_key(&k);
                 root
             })
-            .collect()
+            .collect())
     }
 
     /// Prune slot index entries with slot < finalized_slot.
@@ -1024,11 +1040,12 @@ impl Store {
     }
 
     /// Get the block header by root.
-    pub fn get_block_header(&self, root: &H256) -> Option<BlockHeader> {
+    pub fn get_block_header(&self, root: &H256) -> Result<Option<BlockHeader>, Error> {
         let view = self.backend.begin_read().expect("read view");
-        view.get(Table::BlockHeaders, &root.to_ssz())
+        Ok(view
+            .get(Table::BlockHeaders, &root.to_ssz())
             .expect("get")
-            .map(|bytes| BlockHeader::from_ssz_bytes(&bytes).expect("valid header"))
+            .map(|bytes| BlockHeader::from_ssz_bytes(&bytes).expect("valid header")))
     }
 
     // ============ Signed Blocks ============
@@ -1084,21 +1101,21 @@ impl Store {
     ///
     /// Unlike [`get_signed_block`](Self::get_signed_block), this works for the
     /// genesis block, which has no signature entry.
-    pub fn get_block(&self, root: &H256) -> Option<Block> {
+    pub fn get_block(&self, root: &H256) -> Result<Option<Block>, Error> {
         let view = self.backend.begin_read().expect("read view");
         let key = root.to_ssz();
 
-        let header_bytes = view.get(Table::BlockHeaders, &key).expect("get")?;
+        let header_bytes = view.get(Table::BlockHeaders, &key).expect("get").unwrap();
         let header = BlockHeader::from_ssz_bytes(&header_bytes).expect("valid header");
 
         let body = if header.body_root == *EMPTY_BODY_ROOT {
             BlockBody::default()
         } else {
-            let body_bytes = view.get(Table::BlockBodies, &key).expect("get")?;
+            let body_bytes = view.get(Table::BlockBodies, &key).expect("get").unwrap();
             BlockBody::from_ssz_bytes(&body_bytes).expect("valid body")
         };
 
-        Some(Block::from_header_and_body(header, body))
+        Ok(Some(Block::from_header_and_body(header, body)))
     }
 
     /// Get a signed block by combining header, body, and the merged proof.
@@ -1114,18 +1131,24 @@ impl Store {
     /// synthesize an empty proof for the slot-0 anchor only; for any other slot
     /// a missing signature surfaces as `None` (a pruned finalized block can no
     /// longer be served with its proof) rather than as a fabricated block.
-    pub fn get_signed_block(&self, root: &H256) -> Option<SignedBlock> {
+    pub fn get_signed_block(&self, root: &H256) -> Result<Option<SignedBlock>, Error> {
         let view = self.backend.begin_read().expect("read view");
         let key = root.to_ssz();
 
-        let header_bytes = view.get(Table::BlockHeaders, &key).expect("get")?;
+        let header_bytes = view
+            .get(Table::BlockHeaders, &key)
+            .expect("get")
+            .ok_or(Error::MissingBlockHeader(*root))?;
         let header = BlockHeader::from_ssz_bytes(&header_bytes).expect("valid header");
 
         // Use empty body if header indicates empty, otherwise fetch from DB
         let body = if header.body_root == *EMPTY_BODY_ROOT {
             BlockBody::default()
         } else {
-            let body_bytes = view.get(Table::BlockBodies, &key).expect("get")?;
+            let body_bytes = view
+                .get(Table::BlockBodies, &key)
+                .expect("get")
+                .ok_or(Error::MissingBlockBody(*root))?;
             BlockBody::from_ssz_bytes(&body_bytes).expect("valid body")
         };
 
@@ -1138,15 +1161,15 @@ impl Store {
             // other slot a missing proof (pruned finalized block, or genuine
             // corruption) surfaces as `None` rather than a fabricated block.
             None if header.slot == 0 => MultiMessageAggregate::default(),
-            None => return None,
+            None => return Ok(None),
         };
 
         let block = Block::from_header_and_body(header, body);
 
-        Some(SignedBlock {
+        Ok(Some(SignedBlock {
             message: block,
             proof,
-        })
+        }))
     }
 
     // ============ States ============
@@ -1157,10 +1180,10 @@ impl Store {
     /// reconstructed by walking parent-linked `StateDiffs` back to the nearest
     /// ancestor snapshot and replaying forward. Returns `None` if the diff chain
     /// is broken or the target block header is unavailable.
-    pub fn get_state(&self, root: &H256) -> Option<State> {
+    pub fn get_state(&self, root: &H256) -> Result<Option<State>, Error> {
         // Memoized hot states first (states are immutable per root).
         if let Some(state) = self.state_cache.lock().unwrap().get(root) {
-            return Some(state.clone());
+            return Ok(Some(state.clone()));
         }
         // Anchor snapshot in `States`, otherwise reconstruct from the diff chain.
         let snapshot = {
@@ -1169,9 +1192,14 @@ impl Store {
                 .expect("get")
                 .map(|bytes| State::from_ssz_bytes(&bytes).expect("valid state"))
         };
-        let state = snapshot.or_else(|| self.reconstruct_state(root))?;
+        let state = if let Some(s) = snapshot {
+            s
+        } else {
+            self.reconstruct_state(root)?
+                .ok_or(Error::MissingState(*root))?
+        };
         self.state_cache.lock().unwrap().put(*root, state.clone());
-        Some(state)
+        Ok(Some(state))
     }
 
     /// Reconstruct a state from diffs and the nearest ancestor snapshot.
@@ -1179,7 +1207,7 @@ impl Store {
     /// Walks `base_root` pointers back until a snapshot is found, fetches the
     /// target's block header, and delegates the assembly to
     /// [`state_diff::reconstruct`](crate::state_diff::reconstruct).
-    fn reconstruct_state(&self, root: &H256) -> Option<State> {
+    fn reconstruct_state(&self, root: &H256) -> Result<Option<State>, Error> {
         // Walk back collecting diffs until we reach a snapshot.
         let view = self.backend.begin_read().expect("read view");
         let mut diffs: Vec<StateDiff> = Vec::new();
@@ -1190,7 +1218,8 @@ impl Store {
             }
             let diff_bytes = view
                 .get(Table::StateDiffs, &cursor.to_ssz())
-                .expect("get")?;
+                .expect("get")
+                .ok_or(Error::MissingState(*root))?;
             let diff = StateDiff::from_ssz_bytes(&diff_bytes).expect("valid state diff");
             cursor = diff.base_root;
             diffs.push(diff);
@@ -1202,23 +1231,26 @@ impl Store {
 
         // The latest block header lives in BlockHeaders; the stored state caches
         // the real state_root there, so it equals the header byte-for-byte.
-        let latest_block_header = self.get_block_header(root)?;
+        let latest_block_header = self
+            .get_block_header(root)?
+            .ok_or(Error::MissingBlockHeader(*root))?;
 
-        Some(crate::state_diff::reconstruct(
+        Ok(Some(crate::state_diff::reconstruct(
             snapshot,
             &diffs,
             latest_block_header,
-        ))
+        )))
     }
 
     /// Returns whether a state is available for the given block root.
     ///
     /// True if a snapshot exists or the state can be reconstructed from a diff.
-    pub fn has_state(&self, root: &H256) -> bool {
+    pub fn has_state(&self, root: &H256) -> Result<bool, Error> {
         let view = self.backend.begin_read().expect("read view");
         let key = root.to_ssz();
-        view.get(Table::States, &key).expect("get").is_some()
-            || view.get(Table::StateDiffs, &key).expect("get").is_some()
+        let states = view.get(Table::States, &key).expect("get");
+        let diffs = view.get(Table::StateDiffs, &key).expect("get");
+        Ok(states.is_some() || diffs.is_some())
     }
 
     /// Persist a post-block state as a parent-linked diff, snapshotting at anchors.
@@ -1247,7 +1279,8 @@ impl Store {
         let parent_root = state.latest_block_header.parent_root;
         let parent_state = self
             .get_state(&parent_root)
-            .expect("parent state must exist to diff against");
+            .expect("parent state must exist to diff against")
+            .unwrap();
         let is_anchor =
             state.slot / SNAPSHOT_ANCHOR_INTERVAL > parent_state.slot / SNAPSHOT_ANCHOR_INTERVAL;
 
@@ -1492,22 +1525,25 @@ impl Store {
 
     /// Returns the slot of the current head block.
     pub fn head_slot(&self) -> u64 {
-        self.get_block_header(&self.head())
+        self.get_block_header(&self.head().expect("head block exists"))
             .expect("head block exists")
+            .unwrap()
             .slot
     }
 
     /// Returns the slot of the current safe target block.
     pub fn safe_target_slot(&self) -> u64 {
-        self.get_block_header(&self.safe_target())
+        self.get_block_header(&self.safe_target().expect("safe target exists"))
             .expect("safe target exists")
+            .unwrap()
             .slot
     }
 
     /// Returns a clone of the head state.
     pub fn head_state(&self) -> State {
-        self.get_state(&self.head())
+        self.get_state(&self.head().expect("head block exists"))
             .expect("head state is always available")
+            .unwrap()
     }
 }
 
@@ -1775,12 +1811,22 @@ mod tests {
         assert!(!has_key(backend.as_ref(), Table::States, &r1));
 
         // Hot path: the just-imported state is memoized in the cache.
-        assert_eq!(store.get_state(&r1).unwrap().to_ssz(), s1.to_ssz());
+        assert_eq!(
+            store
+                .get_state(&r1)
+                .expect("get state")
+                .expect("state exists")
+                .to_ssz(),
+            s1.to_ssz()
+        );
 
         // A cold store (empty cache, shared backend) reconstructs from the diff,
         // byte-identically.
         let cold = Store::test_store_with_backend(backend.clone());
-        let reconstructed = cold.get_state(&r1).expect("reconstructs from diff");
+        let reconstructed = cold
+            .get_state(&r1)
+            .expect("reconstructs from diff")
+            .expect("state exists");
         assert_eq!(reconstructed.to_ssz(), s1.to_ssz());
     }
 
@@ -1811,7 +1857,10 @@ mod tests {
         assert!(!has_key(backend.as_ref(), Table::States, &r1));
         assert!(!has_key(backend.as_ref(), Table::States, &r2));
         let cold = Store::test_store_with_backend(backend.clone());
-        let reconstructed = cold.get_state(&r2).expect("reconstructs across diffs");
+        let reconstructed = cold
+            .get_state(&r2)
+            .expect("reconstructs across diffs")
+            .expect("state exists");
         assert_eq!(reconstructed.to_ssz(), s2.to_ssz());
     }
 
@@ -2592,9 +2641,10 @@ mod tests {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         let store = Store::from_anchor_state(backend, State::from_genesis(0, vec![]));
 
-        let head_root = store.head();
+        let head_root = store.head().expect("head root must exist");
         let signed = store
             .get_signed_block(&head_root)
+            .expect("genesis block must be retrievable with synthetic proof")
             .expect("genesis block must be retrievable with synthetic proof");
 
         assert_eq!(signed.message.slot, 0);
@@ -2627,7 +2677,12 @@ mod tests {
         batch.commit().expect("commit");
 
         let store = Store::from_anchor_state(backend, State::from_genesis(0, vec![]));
-        assert!(store.get_signed_block(&root).is_none());
+        assert!(
+            store
+                .get_signed_block(&root)
+                .expect("Failed to get signed block")
+                .is_none()
+        );
     }
 
     /// The bootstrap anchor is stored as a full snapshot in `States`, the base of
@@ -2637,7 +2692,7 @@ mod tests {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         let store = Store::from_anchor_state(backend.clone(), State::from_genesis(0, vec![]));
 
-        let anchor_root = store.head();
+        let anchor_root = store.head().expect("Failed to get head block root");
         assert!(has_key(backend.as_ref(), Table::States, &anchor_root));
     }
 
@@ -2646,7 +2701,11 @@ mod tests {
     #[test]
     fn from_db_state_returns_none_on_empty_backend() {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
-        assert!(Store::from_db_state(backend, 12345).is_none());
+        assert!(
+            Store::from_db_state(backend, 12345)
+                .expect("Failed to get store")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2654,7 +2713,11 @@ mod tests {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         // Write an initial state to the backend.
         let _ = Store::from_anchor_state(backend.clone(), State::from_genesis(12345, vec![]));
-        assert!(Store::from_db_state(backend, 12345).is_some());
+        assert!(
+            Store::from_db_state(backend, 12345)
+                .expect("Failed to get store")
+                .is_some()
+        );
     }
 
     #[test]
@@ -2662,7 +2725,11 @@ mod tests {
         let backend: Arc<dyn StorageBackend> = Arc::new(InMemoryBackend::new());
         // Write an initial state to the backend.
         let _ = Store::from_anchor_state(backend.clone(), State::from_genesis(12345, vec![]));
-        assert!(Store::from_db_state(backend, 99999).is_none());
+        assert!(
+            Store::from_db_state(backend, 99999)
+                .expect("Failed to get store")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2680,6 +2747,10 @@ mod tests {
             )
             .expect("put config");
         batch.commit().expect("commit");
-        assert!(Store::from_db_state(backend, 12345).is_none());
+        assert!(
+            Store::from_db_state(backend, 12345)
+                .expect("Failed to get store")
+                .is_none()
+        );
     }
 }

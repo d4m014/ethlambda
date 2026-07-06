@@ -642,14 +642,17 @@ async fn fetch_initial_state(
     // Checkpoint sync path
 
     // Prefer resuming from a fresh on-disk state to avoid re-downloading what we already have.
-    if let Some(store) = Store::from_db_state(backend.clone(), genesis.genesis_time) {
+    if let Ok(Some(store)) = Store::from_db_state(backend.clone(), genesis.genesis_time) {
         let now_ms = SystemTime::UNIX_EPOCH
             .elapsed()
             .expect("already past the unix epoch")
             .as_millis() as u64;
         let current_slot =
             now_ms.saturating_sub(genesis.genesis_time * 1000) / MILLISECONDS_PER_SLOT;
-        let finalized_slot = store.latest_finalized().slot;
+        let finalized_slot = store
+            .latest_finalized()
+            .expect("latest finalized checkpoint exists")
+            .slot;
         let gap = current_slot.saturating_sub(finalized_slot);
         if gap <= MAX_RESUMABLE_DB_STATE_AGE {
             info!(

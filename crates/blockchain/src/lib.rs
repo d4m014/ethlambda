@@ -113,7 +113,7 @@ impl BlockChain {
     ) -> BlockChain {
         metrics::set_is_aggregator(aggregator.is_enabled());
         metrics::set_node_sync_status(metrics::SyncStatus::Idle);
-        let genesis_time = store.config().genesis_time;
+        let genesis_time = store.config().expect("config exists").genesis_time;
         let mut key_manager = key_manager::KeyManager::new(validator_keys);
 
         // Catch XMSS keys up to the current slot before the first tick
@@ -213,7 +213,7 @@ pub struct BlockChainServer {
 
 impl BlockChainServer {
     async fn on_tick(&mut self, timestamp_ms: u64, ctx: &Context<Self>) {
-        let genesis_time_ms = self.store.config().genesis_time * 1000;
+        let genesis_time_ms = self.store.config().expect("config exists").genesis_time * 1000;
 
         // Calculate current slot and interval from milliseconds
         let time_since_genesis_ms = timestamp_ms.saturating_sub(genesis_time_ms);
@@ -227,7 +227,7 @@ impl BlockChainServer {
         // inside VMs, so a tick scheduled for the next interval boundary can fire
         // while the wall clock still reads the previous interval.
         let tick_interval = time_since_genesis_ms / MILLISECONDS_PER_INTERVAL;
-        let store_time = self.store.time();
+        let store_time = self.store.time().expect("store time exists");
 
         if store_time > 0 && tick_interval <= store_time {
             debug!(
@@ -514,7 +514,7 @@ impl BlockChainServer {
     async fn propose_block(&mut self, slot: u64, validator_id: u64) {
         info!(%slot, %validator_id, "We are the proposer for this slot");
 
-        let genesis_time_ms = self.store.config().genesis_time * 1000;
+        let genesis_time_ms = self.store.config().expect("config exists").genesis_time * 1000;
         let slot_start_ms = genesis_time_ms + slot * MILLISECONDS_PER_SLOT;
 
         // Build the block. `produce_block_with_signatures` advances the store to
@@ -702,8 +702,18 @@ impl BlockChainServer {
     fn process_block(&mut self, signed_block: SignedBlock) -> Result<(), StoreError> {
         store::on_block(&mut self.store, signed_block)?;
         metrics::update_head_slot(self.store.head_slot());
-        metrics::update_latest_justified_slot(self.store.latest_justified().slot);
-        metrics::update_latest_finalized_slot(self.store.latest_finalized().slot);
+        metrics::update_latest_justified_slot(
+            self.store
+                .latest_justified()
+                .expect("Error: Latest justified checkpoint does not exist")
+                .slot,
+        );
+        metrics::update_latest_finalized_slot(
+            self.store
+                .latest_finalized()
+                .expect("Error: Latest finalized checkpoint does not exist")
+                .slot,
+        );
         metrics::update_validators_count(self.key_manager.validator_ids().len() as u64);
 
         for table in ALL_TABLES {
@@ -727,7 +737,9 @@ impl BlockChainServer {
         // Prune old states and blocks AFTER the entire cascade completes.
         // Running this mid-cascade would delete states that pending children
         // still need, causing re-processing loops when fallback pruning is active.
-        self.store.prune_old_data();
+        self.store
+            .prune_old_data()
+            .expect("DB pruning should succeed");
     }
 
     /// Try to process a single block. If its parent state is missing, store it
@@ -747,7 +759,13 @@ impl BlockChainServer {
         // already part of the canonical chain and cannot affect fork choice.
         // Discard any pending children: since we won't process this block,
         // children referencing it as parent would remain stuck indefinitely.
-        if slot <= self.store.latest_finalized().slot {
+        if slot
+            <= self
+                .store
+                .latest_finalized()
+                .expect("Error: Latest finalized checkpoint does not exist")
+                .slot
+        {
             self.discard_pending_subtree(block_root);
             return;
         }
@@ -759,7 +777,7 @@ impl BlockChainServer {
         // Catching this early also avoids persisting bogus future blocks to
         // RocksDB and triggering BlocksByRoot fan-out for fabricated parents.
         let block_start_interval = slot.saturating_mul(INTERVALS_PER_SLOT);
-        let store_time = self.store.time();
+        let store_time = self.store.time().expect("store time exists");
         if block_start_interval > store_time + GOSSIP_DISPARITY_INTERVALS {
             warn!(
                 %slot,
@@ -774,7 +792,11 @@ impl BlockChainServer {
         }
 
         // Check if parent state exists before attempting to process
-        if !self.store.has_state(&parent_root) {
+        if !self
+            .store
+            .has_state(&parent_root)
+            .expect("DB read should succeed")
+        {
             info!(%slot, %parent_root, %block_root, "Block parent missing, storing as pending");
 
             // Resolve the actual missing ancestor by walking the chain. A stale entry
@@ -802,14 +824,23 @@ impl BlockChainServer {
             // session, the actual missing block is further up the chain.
             // Note: this loop always terminates — blocks reference parents by hash,
             // so a cycle would require a hash collision.
-            while let Some(header) = self.store.get_block_header(&missing_root) {
-                if self.store.has_state(&header.parent_root) {
+            while let Some(header) = self
+                .store
+                .get_block_header(&missing_root)
+                .expect("DB read should succeed")
+            {
+                if self
+                    .store
+                    .has_state(&header.parent_root)
+                    .expect("DB read should succeed")
+                {
                     // Parent state available — enqueue for processing, cascade
                     // handles the rest via the outer loop.
                     let block = self
                         .store
                         .get_signed_block(&missing_root)
-                        .expect("header and parent state exist, so the full signed block must too");
+                        .expect("header and parent state exist, so the full signed block must too")
+                        .unwrap();
                     queue.push_back(block);
                     return;
                 }
@@ -921,7 +952,7 @@ impl BlockChainServer {
             self.pending_block_parents.remove(&block_root);
 
             // Load block data from DB
-            let Some(child_block) = self.store.get_signed_block(&block_root) else {
+            let Ok(Some(child_block)) = self.store.get_signed_block(&block_root) else {
                 warn!(
                     block_root = %ShortRoot(&block_root.0),
                     "Pending block missing from DB, skipping"
@@ -966,7 +997,11 @@ impl BlockChainServer {
 
     fn update_sync_status(&mut self, current_slot: u64) {
         let head_slot = self.store.head_slot();
-        let max_seen_slot = self.store.max_live_chain_slot().unwrap_or(head_slot);
+        let max_seen_slot = self
+            .store
+            .max_live_chain_slot()
+            .expect("max live chain slot exists")
+            .unwrap_or(head_slot);
         let status = self
             .sync_status
             .update(current_slot, head_slot, max_seen_slot);
@@ -990,7 +1025,7 @@ impl BlockChainServer {
         let now_ms = unix_now_ms();
         self.on_tick(now_ms, ctx).await;
 
-        let genesis_time_ms = self.store.config().genesis_time * 1000;
+        let genesis_time_ms = self.store.config().expect("Config exists").genesis_time * 1000;
         let remaining_at_entry = ms_until_next_interval(now_ms, genesis_time_ms);
         let now_after_tick = unix_now_ms();
         let elapsed = now_after_tick.saturating_sub(now_ms);
