@@ -313,13 +313,8 @@ pub fn on_tick(store: &mut Store, timestamp_ms: u64, has_proposal: bool) {
             .set_time(store.time().unwrap() + 1)
             .expect("set_time should succeed");
 
-<<<<<<< HEAD
-        let slot = store.time() / INTERVALS_PER_SLOT;
-        let interval = SlotInterval::from_intervals_since_genesis(store.time());
-=======
         let slot = store.time().unwrap() / INTERVALS_PER_SLOT;
-        let interval = store.time().unwrap() % INTERVALS_PER_SLOT;
->>>>>>> e4e98d4 (feat: make store begin_read callers return Result and update callers)
+        let interval = SlotInterval::from_intervals_since_genesis(store.time().unwrap());
 
         trace!(%slot, ?interval, "processing tick");
 
@@ -891,7 +886,10 @@ pub fn produce_block_with_signatures(
     // divergence inherited from a minority fork, but it may not always
     // converge. We still publish the block in that case (halting block
     // production freezes the chain, which is worse) and only log the divergence.
-    let store_justified_slot = store.latest_justified().expect("latest finalized checkpoint exists").slot;
+    let store_justified_slot = store
+        .latest_justified()
+        .expect("latest finalized checkpoint exists")
+        .slot;
     if post_checkpoints.justified.slot < store_justified_slot {
         warn!(
             %slot,
