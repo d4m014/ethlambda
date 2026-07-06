@@ -9,4 +9,6 @@ pub enum Error {
     MissingBlockBody(H256),
     #[error("missing state for root {0:?}")]
     MissingState(H256),
+    #[error("missing metadata for key {0:?}")]
+    MissingMetadata(Vec<u8>),
 }

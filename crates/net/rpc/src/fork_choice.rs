@@ -58,7 +58,9 @@ pub(crate) async fn get_fork_choice(
         .map(|(root, &(slot, parent_root))| {
             let proposer_index = store
                 .get_block_header(root)
-                .map(|h| h.unwrap().proposer_index)
+                .ok()
+                .flatten()
+                .map(|h| h.proposer_index)
                 .unwrap_or(0);
 
             ForkChoiceNode {

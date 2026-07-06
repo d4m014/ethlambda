@@ -602,11 +602,11 @@ impl Store {
             let bytes = view
                 .get(Table::Metadata, KEY_CONFIG)
                 .expect("get config")
-                .unwrap();
+                .ok_or(Error::MissingMetadata(KEY_CONFIG.to_vec()))?;
             // probe KEY_LATEST_FINALIZED
             view.get(Table::Metadata, KEY_LATEST_FINALIZED)
                 .expect("get latest finalized")
-                .unwrap();
+                .ok_or(Error::MissingMetadata(KEY_LATEST_FINALIZED.to_vec()))?;
             ChainConfig::from_ssz_bytes(&bytes).expect("valid config")
         };
         if persisted_config.genesis_time != expected_genesis_time {
@@ -1105,13 +1105,19 @@ impl Store {
         let view = self.backend.begin_read().expect("read view");
         let key = root.to_ssz();
 
-        let header_bytes = view.get(Table::BlockHeaders, &key).expect("get").unwrap();
+        let header_bytes = view
+            .get(Table::BlockHeaders, &key)
+            .expect("get")
+            .ok_or(Error::MissingBlockHeader(*root))?;
         let header = BlockHeader::from_ssz_bytes(&header_bytes).expect("valid header");
 
         let body = if header.body_root == *EMPTY_BODY_ROOT {
             BlockBody::default()
         } else {
-            let body_bytes = view.get(Table::BlockBodies, &key).expect("get").unwrap();
+            let body_bytes = view
+                .get(Table::BlockBodies, &key)
+                .expect("get")
+                .ok_or(Error::MissingBlockBody(*root))?;
             BlockBody::from_ssz_bytes(&body_bytes).expect("valid body")
         };
 
