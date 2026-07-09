@@ -605,14 +605,16 @@ impl Store {
     ) -> Result<Option<Self>, Error> {
         let persisted_config = {
             let view = backend.begin_read().expect("read view");
-            let bytes = view
-                .get(Table::Metadata, KEY_CONFIG)
-                .expect("get config")
-                .ok_or(Error::MissingMetadata(KEY_CONFIG.to_vec()))?;
-            // probe KEY_LATEST_FINALIZED
-            view.get(Table::Metadata, KEY_LATEST_FINALIZED)
+            let Some(bytes) = view.get(Table::Metadata, KEY_CONFIG).expect("get config") else {
+                return Ok(None);
+            };
+            if view
+                .get(Table::Metadata, KEY_LATEST_FINALIZED)
                 .expect("get latest finalized")
-                .ok_or(Error::MissingMetadata(KEY_LATEST_FINALIZED.to_vec()))?;
+                .is_none()
+            {
+                return Ok(None);
+            }
             ChainConfig::from_ssz_bytes(&bytes).expect("valid config")
         };
         if persisted_config.genesis_time != expected_genesis_time {
@@ -1111,19 +1113,17 @@ impl Store {
         let view = self.backend.begin_read().expect("read view");
         let key = root.to_ssz();
 
-        let header_bytes = view
-            .get(Table::BlockHeaders, &key)
-            .expect("get")
-            .ok_or(Error::MissingBlockHeader(*root))?;
+        let Some(header_bytes) = view.get(Table::BlockHeaders, &key).expect("get") else {
+            return Ok(None);
+        };
         let header = BlockHeader::from_ssz_bytes(&header_bytes).expect("valid header");
 
         let body = if header.body_root == *EMPTY_BODY_ROOT {
             BlockBody::default()
         } else {
-            let body_bytes = view
-                .get(Table::BlockBodies, &key)
-                .expect("get")
-                .ok_or(Error::MissingBlockBody(*root))?;
+            let Some(body_bytes) = view.get(Table::BlockBodies, &key).expect("get") else {
+                return Ok(None);
+            };
             BlockBody::from_ssz_bytes(&body_bytes).expect("valid body")
         };
 
@@ -1147,20 +1147,18 @@ impl Store {
         let view = self.backend.begin_read().expect("read view");
         let key = root.to_ssz();
 
-        let header_bytes = view
-            .get(Table::BlockHeaders, &key)
-            .expect("get")
-            .ok_or(Error::MissingBlockHeader(*root))?;
+        let Some(header_bytes) = view.get(Table::BlockHeaders, &key).expect("get") else {
+            return Ok(None);
+        };
         let header = BlockHeader::from_ssz_bytes(&header_bytes).expect("valid header");
 
         // Use empty body if header indicates empty, otherwise fetch from DB
         let body = if header.body_root == *EMPTY_BODY_ROOT {
             BlockBody::default()
         } else {
-            let body_bytes = view
-                .get(Table::BlockBodies, &key)
-                .expect("get")
-                .ok_or(Error::MissingBlockBody(*root))?;
+            let Some(body_bytes) = view.get(Table::BlockBodies, &key).expect("get") else {
+                return Ok(None);
+            };
             BlockBody::from_ssz_bytes(&body_bytes).expect("valid body")
         };
 
@@ -1207,8 +1205,10 @@ impl Store {
         let state = if let Some(s) = snapshot {
             s
         } else {
-            self.reconstruct_state(root)?
-                .ok_or(Error::MissingState(*root))?
+            let Some(s) = self.reconstruct_state(root)? else {
+                return Ok(None);
+            };
+            s
         };
         self.state_cache.lock().unwrap().put(*root, state.clone());
         Ok(Some(state))
@@ -1219,6 +1219,8 @@ impl Store {
     /// Walks `base_root` pointers back until a snapshot is found, fetches the
     /// target's block header, and delegates the assembly to
     /// [`state_diff::reconstruct`](crate::state_diff::reconstruct).
+    ///
+    /// Returns `Ok(None)` when the root is unknown or the diff chain is broken.
     fn reconstruct_state(&self, root: &H256) -> Result<Option<State>, Error> {
         // Walk back collecting diffs until we reach a snapshot.
         let view = self.backend.begin_read().expect("read view");
@@ -1228,10 +1230,10 @@ impl Store {
             if let Some(bytes) = view.get(Table::States, &cursor.to_ssz()).expect("get") {
                 break State::from_ssz_bytes(&bytes).expect("valid state");
             }
-            let diff_bytes = view
-                .get(Table::StateDiffs, &cursor.to_ssz())
-                .expect("get")
-                .ok_or(Error::MissingState(*root))?;
+            let Some(diff_bytes) = view.get(Table::StateDiffs, &cursor.to_ssz()).expect("get")
+            else {
+                return Ok(None);
+            };
             let diff = StateDiff::from_ssz_bytes(&diff_bytes).expect("valid state diff");
             cursor = diff.base_root;
             diffs.push(diff);
@@ -1243,9 +1245,9 @@ impl Store {
 
         // The latest block header lives in BlockHeaders; the stored state caches
         // the real state_root there, so it equals the header byte-for-byte.
-        let latest_block_header = self
-            .get_block_header(root)?
-            .ok_or(Error::MissingBlockHeader(*root))?;
+        let Some(latest_block_header) = self.get_block_header(root)? else {
+            return Ok(None);
+        };
 
         Ok(Some(crate::state_diff::reconstruct(
             snapshot,
