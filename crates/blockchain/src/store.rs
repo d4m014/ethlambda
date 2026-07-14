@@ -270,7 +270,9 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
     // re-entering the pools after finalization pruning has dropped it. This is
     // sound because the store's finalized checkpoint is re-derived from the head
     // on each update, so it is always an ancestor of the head. See leanSpec #1179.
-    let finalized = store.latest_finalized();
+    let finalized = store
+        .latest_finalized()
+        .expect("latest finalized checkpoint exists");
     if !checkpoint_is_ancestor(store, &finalized, &data.head, &head_header) {
         return Err(StoreError::HeadNotDescendantOfFinalized {
             head_root: data.head.root,
@@ -1627,7 +1629,7 @@ mod tests {
     #[test]
     fn validate_attestation_rejects_head_off_finalized_branch() {
         let mut store = new_test_store();
-        let genesis = store.head();
+        let genesis = store.head().expect("store head exists");
 
         // Canonical chain: genesis(0) <- block_1(1) <- block_2(2).
         // Orphan branch off block_1: block_1(1) <- orph_2(2) <- orph_3(3).
